@@ -665,6 +665,10 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    getChatName: async (jid: string) => {
+      const channel = findChannel(channels, jid);
+      return channel?.getChatName?.(jid) ?? null;
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

@@ -110,6 +110,8 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  /** Optional: resolve a chat JID to its display name via platform API */
+  getChatName?(jid: string): Promise<string | null>;
 }
 
 // Callback type that channels use to deliver inbound messages

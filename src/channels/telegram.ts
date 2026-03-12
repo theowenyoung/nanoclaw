@@ -263,7 +263,9 @@ export class TelegramChannel implements Channel {
       lines.push(`Group: ${group.name}`);
       lines.push(`Folder: ${group.folder}`);
       if (status) {
-        lines.push(`Agent: ${status.active ? (status.idleWaiting ? 'idle' : 'running') : 'stopped'}`);
+        lines.push(
+          `Agent: ${status.active ? (status.idleWaiting ? 'idle' : 'running') : 'stopped'}`,
+        );
         if (status.isTaskContainer && status.runningTaskId) {
           lines.push(`Running task: ${status.runningTaskId}`);
         }
@@ -293,11 +295,14 @@ export class TelegramChannel implements Channel {
         return;
       }
       const lines = tasks.map((t) => {
-        const status = t.status === 'active' ? '▶' : t.status === 'paused' ? '⏸' : '✓';
-        const schedule = t.schedule_type === 'once'
-          ? `once at ${t.schedule_value}`
-          : `${t.schedule_type}: ${t.schedule_value}`;
-        const prompt = t.prompt.length > 60 ? t.prompt.slice(0, 60) + '...' : t.prompt;
+        const status =
+          t.status === 'active' ? '▶' : t.status === 'paused' ? '⏸' : '✓';
+        const schedule =
+          t.schedule_type === 'once'
+            ? `once at ${t.schedule_value}`
+            : `${t.schedule_type}: ${t.schedule_value}`;
+        const prompt =
+          t.prompt.length > 60 ? t.prompt.slice(0, 60) + '...' : t.prompt;
         return `${status} ${t.id}\n  ${schedule}\n  ${prompt}`;
       });
       ctx.reply(lines.join('\n\n'));
@@ -598,7 +603,7 @@ export class TelegramChannel implements Channel {
       { command: 'status', description: 'Check bot and agent status' },
       { command: 'tasks', description: 'List scheduled tasks' },
       { command: 'ping', description: 'Check if bot is online' },
-      { command: 'chatid', description: 'Get this chat\'s registration ID' },
+      { command: 'chatid', description: "Get this chat's registration ID" },
     ]);
 
     // Start polling — returns a Promise that resolves when started
@@ -655,6 +660,20 @@ export class TelegramChannel implements Channel {
     return jid.startsWith('tg:');
   }
 
+  async getChatName(jid: string): Promise<string | null> {
+    if (!this.bot) return null;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const chat = await this.bot.api.getChat(numericId);
+      return ('title' in chat ? chat.title : null)
+        || ('first_name' in chat ? chat.first_name : null)
+        || null;
+    } catch (err) {
+      logger.warn({ jid, err }, 'Failed to get chat name from Telegram');
+      return null;
+    }
+  }
+
   async disconnect(): Promise<void> {
     if (this.bot) {
       this.bot.stop();
@@ -663,14 +682,33 @@ export class TelegramChannel implements Channel {
     }
   }
 
+  private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.bot || !isTyping) return;
-    try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendChatAction(numericId, 'typing');
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+    if (!this.bot) return;
+
+    if (!isTyping) {
+      const existing = this.typingIntervals.get(jid);
+      if (existing) {
+        clearInterval(existing);
+        this.typingIntervals.delete(jid);
+      }
+      return;
     }
+
+    // Already typing for this chat
+    if (this.typingIntervals.has(jid)) return;
+
+    const numericId = jid.replace(/^tg:/, '');
+    const sendTyping = () => {
+      this.bot?.api.sendChatAction(numericId, 'typing').catch((err) => {
+        logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
+      });
+    };
+
+    // Send immediately, then repeat every 4s (Telegram typing expires after 5s)
+    sendTyping();
+    this.typingIntervals.set(jid, setInterval(sendTyping, 4000));
   }
 }
 

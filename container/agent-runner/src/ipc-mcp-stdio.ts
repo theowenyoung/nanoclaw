@@ -304,9 +304,10 @@ server.tool(
 Use available_groups.json to find the JID for a group. The folder name must be channel-prefixed: "{channel}_{group-name}" (e.g., "whatsapp_family-chat", "telegram_dev-team", "discord_general"). Use lowercase with hyphens for the group name part.`,
   {
     jid: z.string().describe('The chat JID (e.g., "120363336345536173@g.us", "tg:-1001234567890", "dc:1234567890123456")'),
-    name: z.string().describe('Display name for the group'),
+    name: z.string().optional().describe('Display name for the group. If omitted, the name is auto-resolved from the channel API.'),
     folder: z.string().describe('Channel-prefixed folder name (e.g., "whatsapp_family-chat", "telegram_dev-team")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),
+    requires_trigger: z.boolean().optional().describe('Whether the group requires a trigger word to activate. Defaults to true for groups. Set to false for private chats or groups where every message should be processed.'),
   },
   async (args) => {
     if (!isMain) {
@@ -316,19 +317,24 @@ Use available_groups.json to find the JID for a group. The folder name must be c
       };
     }
 
-    const data = {
+    const data: Record<string, unknown> = {
       type: 'register_group',
       jid: args.jid,
-      name: args.name,
       folder: args.folder,
       trigger: args.trigger,
       timestamp: new Date().toISOString(),
     };
+    if (args.name) {
+      data.name = args.name;
+    }
+    if (args.requires_trigger !== undefined) {
+      data.requiresTrigger = args.requires_trigger;
+    }
 
     writeIpcFile(TASKS_DIR, data);
 
     return {
-      content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
+      content: [{ type: 'text' as const, text: `Group "${args.name || args.folder}" registration requested. Name will be auto-resolved if not provided.` }],
     };
   },
 );

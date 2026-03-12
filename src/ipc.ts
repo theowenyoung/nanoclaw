@@ -28,6 +28,8 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+  /** Resolve a chat JID to its display name via the owning channel's API */
+  getChatName?: (jid: string) => Promise<string | null>;
 }
 
 let ipcWatcherRunning = false;
@@ -443,7 +445,7 @@ export async function processTaskIpc(
         );
         break;
       }
-      if (data.jid && data.name && data.folder && data.trigger) {
+      if (data.jid && data.folder && data.trigger) {
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
             { sourceGroup, folder: data.folder },
@@ -451,9 +453,24 @@ export async function processTaskIpc(
           );
           break;
         }
+        // Auto-resolve group name from channel API if not provided
+        let groupName = data.name as string | undefined;
+        if (!groupName && deps.getChatName) {
+          try {
+            groupName = (await deps.getChatName(data.jid)) || undefined;
+          } catch (err) {
+            logger.warn(
+              { jid: data.jid, err },
+              'Failed to resolve chat name via API',
+            );
+          }
+        }
+        if (!groupName) {
+          groupName = data.folder;
+        }
         // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
-          name: data.name,
+          name: groupName,
           folder: data.folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),

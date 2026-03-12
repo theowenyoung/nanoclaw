@@ -23,7 +23,9 @@ export interface ChannelOpts {
   /** Cancel (close) the active container for a group JID */
   cancelContainer?: (groupJid: string) => void;
   /** Get scheduled tasks for a group folder */
-  getTasksForGroup?: (groupFolder: string) => import('../types.js').ScheduledTask[];
+  getTasksForGroup?: (
+    groupFolder: string,
+  ) => import('../types.js').ScheduledTask[];
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;
