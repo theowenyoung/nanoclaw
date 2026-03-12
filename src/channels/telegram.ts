@@ -665,9 +665,11 @@ export class TelegramChannel implements Channel {
     try {
       const numericId = jid.replace(/^tg:/, '');
       const chat = await this.bot.api.getChat(numericId);
-      return ('title' in chat ? chat.title : null)
-        || ('first_name' in chat ? chat.first_name : null)
-        || null;
+      return (
+        ('title' in chat ? chat.title : null) ||
+        ('first_name' in chat ? chat.first_name : null) ||
+        null
+      );
     } catch (err) {
       logger.warn({ jid, err }, 'Failed to get chat name from Telegram');
       return null;

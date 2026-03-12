@@ -660,13 +660,32 @@ describe('register_group success', () => {
     expect(group!.trigger).toBe('@Andy');
   });
 
-  it('register_group rejects request with missing fields', async () => {
+  it('auto-generates folder from group name when folder not provided', async () => {
+    await processTaskIpc(
+      {
+        type: 'register_group',
+        jid: 'tg:-1001234567890',
+        name: 'My Dev Team!',
+        trigger: '@Andy',
+      },
+      'whatsapp_main',
+      true,
+      deps,
+    );
+
+    const group = getRegisteredGroup('tg:-1001234567890');
+    expect(group).toBeDefined();
+    expect(group!.folder).toBe('telegram_my-dev-team');
+    expect(group!.name).toBe('My Dev Team!');
+  });
+
+  it('register_group rejects request with missing trigger', async () => {
     await processTaskIpc(
       {
         type: 'register_group',
         jid: 'partial@g.us',
         name: 'Partial',
-        // missing folder and trigger
+        // missing trigger
       },
       'whatsapp_main',
       true,

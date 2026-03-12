@@ -13,6 +13,29 @@ import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
+import slugify from 'limax';
+
+/**
+ * Generate a slug-style folder name from a channel prefix and group name.
+ * Uses limax for CJK (Chinese pinyin, Japanese romaji, etc.) support.
+ * E.g. "telegram" + "My Dev Team!" => "telegram_my-dev-team"
+ *      "telegram" + "我的开发团队" => "telegram_wo3-de-kai1-fa1-tuan2-dui4"
+ */
+export function slugifyGroupFolder(channel: string, name: string): string {
+  const slug = slugify(name, { separator: '-' }) || 'group';
+  return `${channel}_${slug}`.slice(0, 64);
+}
+
+/**
+ * Extract channel prefix from a JID (e.g. "tg:-123" => "telegram", "dc:123" => "discord").
+ */
+function channelFromJid(jid: string): string {
+  if (jid.startsWith('tg:')) return 'telegram';
+  if (jid.startsWith('dc:')) return 'discord';
+  if (jid.startsWith('sl:')) return 'slack';
+  if (jid.includes('@g.us') || jid.includes('@s.whatsapp.net')) return 'whatsapp';
+  return 'chat';
+}
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
 
@@ -445,14 +468,7 @@ export async function processTaskIpc(
         );
         break;
       }
-      if (data.jid && data.folder && data.trigger) {
-        if (!isValidGroupFolder(data.folder)) {
-          logger.warn(
-            { sourceGroup, folder: data.folder },
-            'Invalid register_group request - unsafe folder name',
-          );
-          break;
-        }
+      if (data.jid && data.trigger) {
         // Auto-resolve group name from channel API if not provided
         let groupName = data.name as string | undefined;
         if (!groupName && deps.getChatName) {
@@ -465,13 +481,50 @@ export async function processTaskIpc(
             );
           }
         }
+
+        // Auto-generate folder from group name if not provided
+        let folder = data.folder as string | undefined;
+        if (!folder && groupName) {
+          const channel = channelFromJid(data.jid);
+          folder = slugifyGroupFolder(channel, groupName);
+          // Deduplicate: append suffix if folder already exists
+          const existingFolders = new Set(
+            Object.values(deps.registeredGroups()).map((g) => g.folder),
+          );
+          if (existingFolders.has(folder)) {
+            let suffix = 2;
+            while (existingFolders.has(`${folder}-${suffix}`)) suffix++;
+            folder = `${folder}-${suffix}`;
+          }
+          logger.info(
+            { jid: data.jid, groupName, folder },
+            'Auto-generated folder name from group name',
+          );
+        }
+
+        if (!folder) {
+          logger.warn(
+            { data },
+            'Invalid register_group request - no folder and no name to generate one',
+          );
+          break;
+        }
+
+        if (!isValidGroupFolder(folder)) {
+          logger.warn(
+            { sourceGroup, folder },
+            'Invalid register_group request - unsafe folder name',
+          );
+          break;
+        }
+
         if (!groupName) {
-          groupName = data.folder;
+          groupName = folder;
         }
         // Defense in depth: agent cannot set isMain via IPC
         deps.registerGroup(data.jid, {
           name: groupName,
-          folder: data.folder,
+          folder,
           trigger: data.trigger,
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,

@@ -261,6 +261,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           { group: group.name },
           `Agent output: ${raw.slice(0, 200)}`,
         );
+        // Stop typing before sending the message
+        await channel.setTyping?.(chatJid, false);
         if (text) {
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;

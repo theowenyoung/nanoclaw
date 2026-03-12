@@ -185,17 +185,11 @@ Fields:
 ### Adding a Group
 
 1. Query the database to find the group's JID
-2. Use the `register_group` MCP tool with the JID, name, folder, and trigger
-3. Optionally include `containerConfig` for additional mounts
-4. The group folder is created automatically: `/workspace/project/groups/{folder-name}/`
-5. Optionally create an initial `CLAUDE.md` for the group
-
-Folder naming convention — channel prefix with underscore separator:
-- WhatsApp "Family Chat" → `whatsapp_family-chat`
-- Telegram "Dev Team" → `telegram_dev-team`
-- Discord "General" → `discord_general`
-- Slack "Engineering" → `slack_engineering`
-- Use lowercase, hyphens for the group name part
+2. Use the `register_group` MCP tool with the JID, trigger, and optionally name
+3. The folder name is auto-generated from the group name as a slug (e.g., "telegram_my-dev-team"). You can override it with the `folder` parameter if needed.
+4. Optionally include `containerConfig` for additional mounts
+5. The group folder is created automatically: `/workspace/project/groups/{folder-name}/`
+6. Optionally create an initial `CLAUDE.md` for the group
 
 #### Adding Additional Directories for a Group
 
