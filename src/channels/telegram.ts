@@ -54,11 +54,7 @@ function getReplyContext(ctx: any): string {
   return `[Replying to ${replySender}: ${replyPreview}]\n`;
 }
 
-export interface TelegramChannelOpts {
-  onMessage: OnInboundMessage;
-  onChatMetadata: OnChatMetadata;
-  registeredGroups: () => Record<string, RegisteredGroup>;
-}
+export interface TelegramChannelOpts extends ChannelOpts {}
 
 /**
  * Send a message with Telegram Markdown parse mode, falling back to plain text.
@@ -212,6 +208,99 @@ export class TelegramChannel implements Channel {
     // Command to check bot status
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
+    });
+
+    // Command to start a fresh conversation
+    this.bot.command('new', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        ctx.reply('This chat is not registered.');
+        return;
+      }
+      if (!this.opts.resetSession) {
+        ctx.reply('Session reset is not available.');
+        return;
+      }
+      // Cancel active container first if running
+      if (this.opts.cancelContainer) {
+        const status = this.opts.getGroupStatus?.(chatJid);
+        if (status?.active) {
+          this.opts.cancelContainer(chatJid);
+        }
+      }
+      this.opts.resetSession(group.folder);
+      ctx.reply('Session cleared. Next message starts a fresh conversation.');
+    });
+
+    // Command to cancel the active container
+    this.bot.command('cancel', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        ctx.reply('This chat is not registered.');
+        return;
+      }
+      const status = this.opts.getGroupStatus?.(chatJid);
+      if (!status?.active) {
+        ctx.reply('No active agent running.');
+        return;
+      }
+      this.opts.cancelContainer?.(chatJid);
+      ctx.reply('Cancelling the running agent...');
+    });
+
+    // Command to check bot and container status
+    this.bot.command('status', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        ctx.reply('This chat is not registered.');
+        return;
+      }
+      const status = this.opts.getGroupStatus?.(chatJid);
+      const lines: string[] = [];
+      lines.push(`Group: ${group.name}`);
+      lines.push(`Folder: ${group.folder}`);
+      if (status) {
+        lines.push(`Agent: ${status.active ? (status.idleWaiting ? 'idle' : 'running') : 'stopped'}`);
+        if (status.isTaskContainer && status.runningTaskId) {
+          lines.push(`Running task: ${status.runningTaskId}`);
+        }
+        if (status.containerName) {
+          lines.push(`Container: ${status.containerName}`);
+        }
+        if (status.pendingTaskCount > 0) {
+          lines.push(`Queued tasks: ${status.pendingTaskCount}`);
+        }
+      } else {
+        lines.push('Agent: stopped');
+      }
+      ctx.reply(lines.join('\n'));
+    });
+
+    // Command to list scheduled tasks
+    this.bot.command('tasks', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) {
+        ctx.reply('This chat is not registered.');
+        return;
+      }
+      const tasks = this.opts.getTasksForGroup?.(group.folder) || [];
+      if (tasks.length === 0) {
+        ctx.reply('No scheduled tasks.');
+        return;
+      }
+      const lines = tasks.map((t) => {
+        const status = t.status === 'active' ? '▶' : t.status === 'paused' ? '⏸' : '✓';
+        const schedule = t.schedule_type === 'once'
+          ? `once at ${t.schedule_value}`
+          : `${t.schedule_type}: ${t.schedule_value}`;
+        const prompt = t.prompt.length > 60 ? t.prompt.slice(0, 60) + '...' : t.prompt;
+        return `${status} ${t.id}\n  ${schedule}\n  ${prompt}`;
+      });
+      ctx.reply(lines.join('\n\n'));
     });
 
     this.bot.on('message:text', async (ctx) => {
@@ -501,6 +590,16 @@ export class TelegramChannel implements Channel {
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
+
+    // Register command menu for Telegram's "/" autocomplete
+    await this.bot.api.setMyCommands([
+      { command: 'new', description: 'Start a fresh conversation' },
+      { command: 'cancel', description: 'Stop the running agent' },
+      { command: 'status', description: 'Check bot and agent status' },
+      { command: 'tasks', description: 'List scheduled tasks' },
+      { command: 'ping', description: 'Check if bot is online' },
+      { command: 'chatid', description: 'Get this chat\'s registration ID' },
+    ]);
 
     // Start polling — returns a Promise that resolves when started
     return new Promise<void>((resolve) => {

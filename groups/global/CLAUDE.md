@@ -57,6 +57,49 @@ NEVER use markdown. Only use WhatsApp/Telegram formatting:
 
 No ## headings. No [links](url). No **double stars**.
 
+## Customizing Your Capabilities
+
+You can extend your own abilities by modifying your agent-runner source code at `/app/src/`. Changes are compiled on each container startup and persist across sessions (per-group isolation).
+
+### Adding an MCP Server
+
+To add a new tool (e.g., Google Calendar, GitHub, etc.), create a new MCP server:
+
+1. Create a new `.ts` file in `/app/src/` (e.g., `google-calendar-mcp.ts`), using `/app/src/ipc-mcp-stdio.ts` as a reference for the pattern.
+2. Register it in `/app/src/index.ts` by adding an entry to the `mcpServers` object inside `query()`:
+   ```typescript
+   mcpServers: {
+     nanoclaw: { ... },  // existing — do NOT remove
+     'google-calendar': {
+       command: 'node',
+       args: [path.join(__dirname, 'google-calendar-mcp.js')],  // .js, not .ts
+     },
+   },
+   ```
+3. Update `allowedTools` in the same `query()` call to include `'mcp__google-calendar__*'`.
+
+Available libraries in the container (no `npm install` needed):
+- `@modelcontextprotocol/sdk` — MCP server framework
+- `zod` — schema validation
+- `node:fs`, `node:path`, `node:crypto`, `node:https` — Node.js built-ins
+
+For packages not already installed, use dynamic `import()` after installing via Bash (`npm install -g <pkg>` or `npm install --prefix /tmp/mcp-deps <pkg>`).
+
+### Storing Credentials
+
+Store OAuth tokens or API keys in `/workspace/group/.credentials/` (persistent, group-isolated). Example:
+```
+/workspace/group/.credentials/google-calendar.json
+```
+Read them from your MCP server at startup. Never hardcode secrets in source files.
+
+### Important Notes
+
+- NEVER remove or break the existing `nanoclaw` MCP server — it provides core messaging and task scheduling.
+- Your `/app/src/` modifications are unique to your group. Other groups are not affected.
+- The container has `curl`, `git`, and `chromium` available for Bash commands.
+- Test your changes by restarting — the entrypoint recompiles TypeScript on each startup.
+
 ## Agent Teams
 
 When creating a team to tackle a complex task, follow these rules:

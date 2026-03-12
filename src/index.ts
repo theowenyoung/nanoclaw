@@ -36,7 +36,9 @@ import {
   getNewMessages,
   getRegisteredGroup,
   getRouterState,
+  getTasksForGroup,
   initDatabase,
+  deleteSession,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -594,6 +596,13 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    resetSession: (groupFolder: string) => {
+      delete sessions[groupFolder];
+      deleteSession(groupFolder);
+    },
+    getGroupStatus: (groupJid: string) => queue.getGroupStatus(groupJid),
+    cancelContainer: (groupJid: string) => queue.closeStdin(groupJid),
+    getTasksForGroup: (groupFolder: string) => getTasksForGroup(groupFolder),
   };
 
   // Create and connect all registered channels.

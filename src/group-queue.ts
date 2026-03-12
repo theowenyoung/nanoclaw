@@ -55,6 +55,35 @@ export class GroupQueue {
     return state;
   }
 
+  getGroupStatus(groupJid: string): {
+    active: boolean;
+    idleWaiting: boolean;
+    isTaskContainer: boolean;
+    runningTaskId: string | null;
+    containerName: string | null;
+    pendingTaskCount: number;
+  } {
+    const state = this.groups.get(groupJid);
+    if (!state) {
+      return {
+        active: false,
+        idleWaiting: false,
+        isTaskContainer: false,
+        runningTaskId: null,
+        containerName: null,
+        pendingTaskCount: 0,
+      };
+    }
+    return {
+      active: state.active,
+      idleWaiting: state.idleWaiting,
+      isTaskContainer: state.isTaskContainer,
+      runningTaskId: state.runningTaskId,
+      containerName: state.containerName,
+      pendingTaskCount: state.pendingTasks.length,
+    };
+  }
+
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
     this.processMessagesFn = fn;
   }
