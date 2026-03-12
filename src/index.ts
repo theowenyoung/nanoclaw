@@ -47,7 +47,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import { enrichMessagesWithAttachments, findChannel, formatMessages, formatMessagesWithAttachments, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -177,7 +177,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages, TIMEZONE);
+  const enriched = enrichMessagesWithAttachments(missedMessages, group.folder);
+  const { text: prompt, images, documents } = formatMessagesWithAttachments(enriched, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -187,7 +188,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
     'Processing messages',
   );
 
@@ -209,7 +210,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const containerImages = images.length > 0
+    ? images.map((img) => ({ filename: img.filename, mediaType: img.mediaType }))
+    : undefined;
+  const containerDocs = documents.length > 0
+    ? documents.map((doc) => ({ filename: doc.filename, mediaType: doc.mediaType, originalName: doc.originalName }))
+    : undefined;
+
+  const output = await runAgent(group, prompt, chatJid, containerImages, containerDocs, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -266,6 +274,8 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
+  images?: { filename: string; mediaType: string }[],
+  documents?: { filename: string; mediaType: string; originalName: string }[],
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
@@ -317,6 +327,8 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        images: images && images.length > 0 ? images : undefined,
+        documents: documents && documents.length > 0 ? documents : undefined,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -415,9 +427,16 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend, TIMEZONE);
+          const enrichedMsgs = enrichMessagesWithAttachments(messagesToSend, group.folder);
+          const { text: formatted, images: pipeImages, documents: pipeDocs } = formatMessagesWithAttachments(enrichedMsgs, TIMEZONE);
+          const pipeContainerImages = pipeImages.length > 0
+            ? pipeImages.map((img) => ({ filename: img.filename, mediaType: img.mediaType }))
+            : undefined;
+          const pipeContainerDocs = pipeDocs.length > 0
+            ? pipeDocs.map((doc) => ({ filename: doc.filename, mediaType: doc.mediaType, originalName: doc.originalName }))
+            : undefined;
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(chatJid, formatted, pipeContainerImages, pipeContainerDocs)) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',

@@ -3,14 +3,56 @@ import { Api, Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { downloadAndStoreDocument, downloadAndStoreImage } from '../image.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  DocumentAttachment,
+  ImageAttachment,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+/**
+ * Extract reply context from a Telegram message.
+ * Returns a prefix string like "[Replying to Alice: original text]" or empty string.
+ */
+function getReplyContext(ctx: any): string {
+  const reply = ctx.message?.reply_to_message;
+  if (!reply) return '';
+
+  const replySender =
+    reply.from?.first_name || reply.from?.username || 'Unknown';
+
+  // Build a summary of the replied-to message
+  let replyPreview = '';
+  if (reply.text) {
+    replyPreview = reply.text;
+  } else if (reply.caption) {
+    replyPreview = reply.caption;
+  } else if (reply.photo) {
+    replyPreview = '[Photo]';
+  } else if (reply.video) {
+    replyPreview = '[Video]';
+  } else if (reply.voice) {
+    replyPreview = '[Voice message]';
+  } else if (reply.document) {
+    replyPreview = `[Document: ${reply.document.file_name || 'file'}]`;
+  } else if (reply.sticker) {
+    replyPreview = `[Sticker ${reply.sticker.emoji || ''}]`;
+  } else {
+    replyPreview = '[message]';
+  }
+
+  // Truncate long replies
+  if (replyPreview.length > 200) {
+    replyPreview = replyPreview.slice(0, 200) + '...';
+  }
+
+  return `[Replying to ${replySender}: ${replyPreview}]\n`;
+}
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -177,7 +219,7 @@ export class TelegramChannel implements Channel {
       if (ctx.message.text.startsWith('/')) return;
 
       const chatJid = `tg:${ctx.chat.id}`;
-      let content = ctx.message.text;
+      let content = getReplyContext(ctx) + ctx.message.text;
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name ||
@@ -264,6 +306,7 @@ export class TelegramChannel implements Channel {
         ctx.from?.id?.toString() ||
         'Unknown';
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const replyCtx = getReplyContext(ctx);
 
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -279,26 +322,158 @@ export class TelegramChannel implements Channel {
         chat_jid: chatJid,
         sender: ctx.from?.id?.toString() || '',
         sender_name: senderName,
-        content: `${placeholder}${caption}`,
+        content: `${replyCtx}${placeholder}${caption}`,
         timestamp,
         is_from_me: false,
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption || '';
+      const msgId = ctx.message.message_id.toString();
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
+
+      // Get the largest photo size (last in array)
+      const photos = ctx.message.photo;
+      const largest = photos[photos.length - 1];
+
+      const replyCtx = getReplyContext(ctx);
+      let content = replyCtx + (caption ? `[Photo] ${caption}` : '[Photo]');
+      let images: ImageAttachment[] | undefined;
+
+      try {
+        const file = await this.bot!.api.getFile(largest.file_id);
+        if (file.file_path) {
+          const imageUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          const stored = await downloadAndStoreImage(imageUrl, group.folder, msgId);
+          if (stored) {
+            images = [stored];
+            // Prepend trigger if caption mentions the bot
+            const botUsername = ctx.me?.username?.toLowerCase();
+            if (botUsername && caption) {
+              const entities = ctx.message.caption_entities || [];
+              const isBotMentioned = entities.some((entity) => {
+                if (entity.type === 'mention') {
+                  const mentionText = caption
+                    .substring(entity.offset, entity.offset + entity.length)
+                    .toLowerCase();
+                  return mentionText === `@${botUsername}`;
+                }
+                return false;
+              });
+              if (isBotMentioned && !TRIGGER_PATTERN.test(content)) {
+                content = `@${ASSISTANT_NAME} ${content}`;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error({ err, chatJid, msgId }, 'Failed to download Telegram photo');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: msgId,
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content,
+        timestamp,
+        is_from_me: false,
+        images,
+      });
+
+      logger.info(
+        { chatJid, sender: senderName, hasImage: !!images },
+        'Telegram photo message stored',
+      );
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    this.bot.on('message:document', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const doc = ctx.message.document;
+      const originalName = doc?.file_name || 'file';
+      const mimeType = doc?.mime_type;
+      const msgId = ctx.message.message_id.toString();
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const replyCtx = getReplyContext(ctx);
+
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+
+      let documents: DocumentAttachment[] | undefined;
+      try {
+        const file = await this.bot!.api.getFile(doc!.file_id);
+        if (file.file_path) {
+          const docUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          const stored = await downloadAndStoreDocument(docUrl, group.folder, msgId, originalName, mimeType);
+          if (stored) {
+            documents = [stored];
+          }
+        }
+      } catch (err) {
+        logger.error({ err, chatJid, msgId }, 'Failed to download Telegram document');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: msgId,
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: `${replyCtx}[Document: ${originalName}]${caption}`,
+        timestamp,
+        is_from_me: false,
+        documents,
+      });
+
+      logger.info(
+        { chatJid, sender: senderName, originalName, hasDoc: !!documents },
+        'Telegram document stored',
+      );
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
       storeNonText(ctx, `[Sticker ${emoji}]`);
     });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
-    this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
+    this.bot.on('message:location', (ctx) => {
+      const loc = ctx.message.location;
+      storeNonText(ctx, `[Location: ${loc.latitude}, ${loc.longitude}]`);
+    });
+    this.bot.on('message:contact', (ctx) => {
+      const c = ctx.message.contact;
+      const name = [c.first_name, c.last_name].filter(Boolean).join(' ');
+      storeNonText(ctx, `[Contact: ${name}, ${c.phone_number}]`);
+    });
 
     // Handle errors gracefully
     this.bot.catch((err) => {

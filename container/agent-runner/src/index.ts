@@ -19,6 +19,17 @@ import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
+interface ContainerImage {
+  filename: string;
+  mediaType: string;
+}
+
+interface ContainerDocument {
+  filename: string;
+  mediaType: string;
+  originalName: string;
+}
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -27,6 +38,8 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  images?: ContainerImage[];
+  documents?: ContainerDocument[];
 }
 
 interface ContainerOutput {
@@ -47,11 +60,80 @@ interface SessionsIndex {
   entries: SessionEntry[];
 }
 
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string }; title?: string };
+
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
+}
+
+const IMAGES_DIR = '/workspace/group/images';
+const DOCS_DIR = '/workspace/group/documents';
+
+/**
+ * Build multimodal content blocks from text, images, and documents.
+ * Reads files from the mounted group directory and base64-encodes them.
+ */
+function buildMultimodalContent(
+  text: string,
+  images?: ContainerImage[],
+  documents?: ContainerDocument[],
+): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+
+  if (documents) {
+    for (const doc of documents) {
+      const docPath = path.join(DOCS_DIR, doc.filename);
+      try {
+        if (fs.existsSync(docPath)) {
+          const data = fs.readFileSync(docPath).toString('base64');
+          blocks.push({
+            type: 'document',
+            source: { type: 'base64', media_type: doc.mediaType, data },
+            title: doc.originalName,
+          });
+          log(`Loaded document: ${doc.originalName} (${data.length} base64 chars)`);
+        } else {
+          log(`Document not found: ${docPath}`);
+        }
+      } catch (err) {
+        log(`Failed to read document ${doc.filename}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  if (images) {
+    for (const img of images) {
+      const imgPath = path.join(IMAGES_DIR, img.filename);
+      try {
+        if (fs.existsSync(imgPath)) {
+          const data = fs.readFileSync(imgPath).toString('base64');
+          blocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: img.mediaType, data },
+          });
+          log(`Loaded image: ${img.filename} (${data.length} base64 chars)`);
+        } else {
+          log(`Image not found: ${imgPath}`);
+        }
+      } catch (err) {
+        log(`Failed to read image ${img.filename}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  blocks.push({ type: 'text', text });
+  return blocks;
+}
+
+/** Check if there are any attachments to process */
+function hasAttachments(images?: ContainerImage[], documents?: ContainerDocument[]): boolean {
+  return (images != null && images.length > 0) || (documents != null && documents.length > 0);
 }
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
@@ -67,10 +149,16 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string): void {
+  push(text: string, images?: ContainerImage[], documents?: ContainerDocument[]): void {
+    let content: string | ContentBlock[];
+    if (hasAttachments(images, documents)) {
+      content = buildMultimodalContent(text, images, documents);
+    } else {
+      content = text;
+    }
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -269,25 +357,31 @@ function shouldClose(): boolean {
   return false;
 }
 
+interface IpcMessage {
+  text: string;
+  images?: ContainerImage[];
+  documents?: ContainerDocument[];
+}
+
 /**
  * Drain all pending IPC input messages.
  * Returns messages found, or empty array.
  */
-function drainIpcInput(): string[] {
+function drainIpcInput(): IpcMessage[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs.readdirSync(IPC_INPUT_DIR)
       .filter(f => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const messages: IpcMessage[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+          messages.push({ text: data.text, images: data.images, documents: data.documents });
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -303,9 +397,9 @@ function drainIpcInput(): string[] {
 
 /**
  * Wait for a new IPC message or _close sentinel.
- * Returns the messages as a single string, or null if _close.
+ * Returns the messages with images, or null if _close.
  */
-function waitForIpcMessage(): Promise<string | null> {
+function waitForIpcMessage(): Promise<IpcMessage | null> {
   return new Promise((resolve) => {
     const poll = () => {
       if (shouldClose()) {
@@ -314,7 +408,20 @@ function waitForIpcMessage(): Promise<string | null> {
       }
       const messages = drainIpcInput();
       if (messages.length > 0) {
-        resolve(messages.join('\n'));
+        // Merge all messages into one, collecting all attachments
+        const allImages: ContainerImage[] = [];
+        const allDocs: ContainerDocument[] = [];
+        const texts: string[] = [];
+        for (const m of messages) {
+          texts.push(m.text);
+          if (m.images) allImages.push(...m.images);
+          if (m.documents) allDocs.push(...m.documents);
+        }
+        resolve({
+          text: texts.join('\n'),
+          images: allImages.length > 0 ? allImages : undefined,
+          documents: allDocs.length > 0 ? allDocs : undefined,
+        });
         return;
       }
       setTimeout(poll, IPC_POLL_MS);
@@ -336,9 +443,11 @@ async function runQuery(
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
   resumeAt?: string,
+  images?: ContainerImage[],
+  documents?: ContainerDocument[],
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+  stream.push(prompt, images, documents);
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -353,9 +462,9 @@ async function runQuery(
       return;
     }
     const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    for (const msg of messages) {
+      log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images, ${msg.documents?.length || 0} docs)`);
+      stream.push(msg.text, msg.images, msg.documents);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -496,13 +605,30 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
+  let initialImages: ContainerImage[] | undefined = containerInput.images
+    ? [...containerInput.images]
+    : undefined;
+  let initialDocs: ContainerDocument[] | undefined = containerInput.documents
+    ? [...containerInput.documents]
+    : undefined;
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.join('\n');
+    prompt += '\n' + pending.map(m => m.text).join('\n');
+    // Collect any attachments from pending IPC messages
+    for (const m of pending) {
+      if (m.images) {
+        if (!initialImages) initialImages = [];
+        initialImages.push(...m.images);
+      }
+      if (m.documents) {
+        if (!initialDocs) initialDocs = [];
+        initialDocs.push(...m.documents);
+      }
+    }
   }
 
   // Query loop: run query → wait for IPC message → run new query → repeat
@@ -511,7 +637,9 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt, initialImages, initialDocs);
+      initialImages = undefined; // Only pass attachments once
+      initialDocs = undefined;
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -539,8 +667,10 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.length} chars), starting new query`);
-      prompt = nextMessage;
+      log(`Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images, ${nextMessage.documents?.length || 0} docs), starting new query`);
+      prompt = nextMessage.text;
+      initialImages = nextMessage.images;
+      initialDocs = nextMessage.documents;
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

@@ -6,6 +6,8 @@ import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import crypto from 'crypto';
+
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -33,6 +35,22 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+export interface ContainerImage {
+  /** Filename in /workspace/group/images/ */
+  filename: string;
+  /** MIME type (e.g., image/jpeg) */
+  mediaType: string;
+}
+
+export interface ContainerDocument {
+  /** Filename in /workspace/group/documents/ */
+  filename: string;
+  /** MIME type (e.g., application/pdf) */
+  mediaType: string;
+  /** Original filename from the sender */
+  originalName: string;
+}
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -41,6 +59,10 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  /** Images attached to messages in this batch */
+  images?: ContainerImage[];
+  /** Documents attached to messages in this batch */
+  documents?: ContainerDocument[];
 }
 
 export interface ContainerOutput {
@@ -54,6 +76,28 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+/**
+ * Compute a deterministic hash of all files in a directory.
+ * Used to detect whether agent-runner source has been customized.
+ */
+function hashDirectory(dirPath: string, exclude: string[] = []): string {
+  const hash = crypto.createHash('sha256');
+  const entries = fs.readdirSync(dirPath).sort();
+  for (const entry of entries) {
+    if (exclude.includes(entry)) continue;
+    const fullPath = path.join(dirPath, entry);
+    const stat = fs.statSync(fullPath);
+    if (stat.isFile()) {
+      hash.update(entry);
+      hash.update(fs.readFileSync(fullPath));
+    } else if (stat.isDirectory()) {
+      hash.update(entry);
+      hash.update(hashDirectory(fullPath, exclude));
+    }
+  }
+  return hash.digest('hex');
 }
 
 function buildVolumeMounts(
@@ -178,6 +222,12 @@ function buildVolumeMounts(
   // Copy agent-runner source into a per-group writable location so agents
   // can customize it (add tools, change behavior) without affecting other
   // groups. Recompiled on container startup via entrypoint.sh.
+  //
+  // Sync strategy:
+  //   - Main group: always overwrite (should stay in sync with source)
+  //   - New group (no copy yet): copy and stamp with source hash
+  //   - Existing group, unmodified (hash matches): safe to overwrite
+  //   - Existing group, customized (hash differs): skip, log info
   const agentRunnerSrc = path.join(
     projectRoot,
     'container',
@@ -190,8 +240,35 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    const sourceHash = hashDirectory(agentRunnerSrc);
+    const hashFile = path.join(groupAgentRunnerDir, '.source-hash');
+    const existingHash = fs.existsSync(hashFile)
+      ? fs.readFileSync(hashFile, 'utf-8').trim()
+      : null;
+
+    if (!fs.existsSync(groupAgentRunnerDir)) {
+      // New group — initial copy
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      fs.writeFileSync(hashFile, sourceHash);
+    } else if (isMain) {
+      // Main group — always sync with source
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      fs.writeFileSync(hashFile, sourceHash);
+    } else {
+      const groupHash = hashDirectory(groupAgentRunnerDir, ['.source-hash']);
+      if (existingHash === null || groupHash === existingHash) {
+        // Unmodified copy (content matches stamped hash, or pre-hash legacy) — safe to update
+        fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+        fs.writeFileSync(hashFile, sourceHash);
+      } else if (sourceHash !== existingHash) {
+        // Agent has customized its runner and source has changed — don't overwrite
+        logger.debug(
+          { group: group.name },
+          'Agent-runner source updated but group has customizations, skipping sync',
+        );
+      }
+    }
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,

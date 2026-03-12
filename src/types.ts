@@ -42,6 +42,22 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
+export interface ImageAttachment {
+  /** Filename relative to the group's images directory */
+  filename: string;
+  /** MIME type (e.g., image/jpeg) */
+  mediaType: string;
+}
+
+export interface DocumentAttachment {
+  /** Filename relative to the group's documents directory */
+  filename: string;
+  /** MIME type (e.g., application/pdf) */
+  mediaType: string;
+  /** Original filename from the sender */
+  originalName: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -51,6 +67,10 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  /** Image attachments (stored in group's images/ directory) */
+  images?: ImageAttachment[];
+  /** Document attachments (stored in group's documents/ directory) */
+  documents?: DocumentAttachment[];
 }
 
 export interface ScheduledTask {
