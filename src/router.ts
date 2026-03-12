@@ -2,7 +2,12 @@ import fs from 'fs';
 import path from 'path';
 
 import { resolveGroupFolderPath } from './group-folder.js';
-import { Channel, DocumentAttachment, ImageAttachment, NewMessage } from './types.js';
+import {
+  Channel,
+  DocumentAttachment,
+  ImageAttachment,
+  NewMessage,
+} from './types.js';
 import { formatLocalTime } from './timezone.js';
 
 export function escapeXml(s: string): string {
@@ -55,27 +60,55 @@ export function enrichMessagesWithAttachments(
       const filename = `${m.id}.jpg`;
       const imgPath = path.join(imagesDir, filename);
       if (fs.existsSync(imgPath)) {
-        enriched = { ...enriched, images: [{ filename, mediaType: 'image/jpeg' }] };
+        enriched = {
+          ...enriched,
+          images: [{ filename, mediaType: 'image/jpeg' }],
+        };
       }
     }
 
     // Enrich documents
     if (!m.documents && m.content.includes('[Document:')) {
       // Try common extensions
-      const extensions = ['.pdf', '.txt', '.html', '.json', '.csv', '.md', '.xml', '.yaml', '.yml', '.js', '.css'];
+      const extensions = [
+        '.pdf',
+        '.txt',
+        '.html',
+        '.json',
+        '.csv',
+        '.md',
+        '.xml',
+        '.yaml',
+        '.yml',
+        '.js',
+        '.css',
+      ];
       for (const ext of extensions) {
         const filename = `${m.id}${ext}`;
         const docPath = path.join(docsDir, filename);
         if (fs.existsSync(docPath)) {
           const mimeMap: Record<string, string> = {
-            '.pdf': 'application/pdf', '.txt': 'text/plain', '.html': 'text/html',
-            '.json': 'application/json', '.csv': 'text/csv', '.md': 'text/markdown',
-            '.xml': 'application/xml', '.yaml': 'text/yaml', '.yml': 'text/yaml',
-            '.js': 'text/javascript', '.css': 'text/css',
+            '.pdf': 'application/pdf',
+            '.txt': 'text/plain',
+            '.html': 'text/html',
+            '.json': 'application/json',
+            '.csv': 'text/csv',
+            '.md': 'text/markdown',
+            '.xml': 'application/xml',
+            '.yaml': 'text/yaml',
+            '.yml': 'text/yaml',
+            '.js': 'text/javascript',
+            '.css': 'text/css',
           };
           enriched = {
             ...enriched,
-            documents: [{ filename, mediaType: mimeMap[ext] || 'application/octet-stream', originalName: filename }],
+            documents: [
+              {
+                filename,
+                mediaType: mimeMap[ext] || 'application/octet-stream',
+                originalName: filename,
+              },
+            ],
           };
           break;
         }

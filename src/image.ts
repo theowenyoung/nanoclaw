@@ -45,7 +45,10 @@ export async function downloadAndStoreImage(
     // Download the image
     const response = await fetch(imageUrl);
     if (!response.ok) {
-      logger.error({ imageUrl, status: response.status }, 'Failed to download image');
+      logger.error(
+        { imageUrl, status: response.status },
+        'Failed to download image',
+      );
       return null;
     }
 
@@ -53,16 +56,17 @@ export async function downloadAndStoreImage(
 
     // Resize with sharp — fit within MAX_DIMENSION, convert to JPEG
     const resized = await sharp(buffer)
-      .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+      .resize(MAX_DIMENSION, MAX_DIMENSION, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
       .jpeg({ quality: 80 })
       .toBuffer();
 
     // Check size after resize
     if (resized.length > MAX_FILE_SIZE) {
       // Re-compress with lower quality
-      const smaller = await sharp(resized)
-        .jpeg({ quality: 50 })
-        .toBuffer();
+      const smaller = await sharp(resized).jpeg({ quality: 50 }).toBuffer();
       return saveImage(smaller, groupFolder, messageId);
     }
 
@@ -86,10 +90,7 @@ function saveImage(
   const filePath = path.join(imagesDir, filename);
   fs.writeFileSync(filePath, buffer);
 
-  logger.info(
-    { groupFolder, filename, size: buffer.length },
-    'Image saved',
-  );
+  logger.info({ groupFolder, filename, size: buffer.length }, 'Image saved');
 
   return { filename, mediaType: 'image/jpeg' };
 }
@@ -124,7 +125,10 @@ export async function downloadAndStoreDocument(
   try {
     const response = await fetch(docUrl);
     if (!response.ok) {
-      logger.error({ docUrl, status: response.status }, 'Failed to download document');
+      logger.error(
+        { docUrl, status: response.status },
+        'Failed to download document',
+      );
       return null;
     }
 

@@ -364,7 +364,11 @@ export class TelegramChannel implements Channel {
         const file = await this.bot!.api.getFile(largest.file_id);
         if (file.file_path) {
           const imageUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-          const stored = await downloadAndStoreImage(imageUrl, group.folder, msgId);
+          const stored = await downloadAndStoreImage(
+            imageUrl,
+            group.folder,
+            msgId,
+          );
           if (stored) {
             images = [stored];
             // Prepend trigger if caption mentions the bot
@@ -387,7 +391,10 @@ export class TelegramChannel implements Channel {
           }
         }
       } catch (err) {
-        logger.error({ err, chatJid, msgId }, 'Failed to download Telegram photo');
+        logger.error(
+          { err, chatJid, msgId },
+          'Failed to download Telegram photo',
+        );
       }
 
       this.opts.onMessage(chatJid, {
@@ -429,20 +436,35 @@ export class TelegramChannel implements Channel {
 
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       let documents: DocumentAttachment[] | undefined;
       try {
         const file = await this.bot!.api.getFile(doc!.file_id);
         if (file.file_path) {
           const docUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-          const stored = await downloadAndStoreDocument(docUrl, group.folder, msgId, originalName, mimeType);
+          const stored = await downloadAndStoreDocument(
+            docUrl,
+            group.folder,
+            msgId,
+            originalName,
+            mimeType,
+          );
           if (stored) {
             documents = [stored];
           }
         }
       } catch (err) {
-        logger.error({ err, chatJid, msgId }, 'Failed to download Telegram document');
+        logger.error(
+          { err, chatJid, msgId },
+          'Failed to download Telegram document',
+        );
       }
 
       this.opts.onMessage(chatJid, {

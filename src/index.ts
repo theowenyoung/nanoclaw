@@ -47,7 +47,13 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { initBotPool } from './channels/telegram.js';
 import { startIpcWatcher } from './ipc.js';
-import { enrichMessagesWithAttachments, findChannel, formatMessages, formatMessagesWithAttachments, formatOutbound } from './router.js';
+import {
+  enrichMessagesWithAttachments,
+  findChannel,
+  formatMessages,
+  formatMessagesWithAttachments,
+  formatOutbound,
+} from './router.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -178,7 +184,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const enriched = enrichMessagesWithAttachments(missedMessages, group.folder);
-  const { text: prompt, images, documents } = formatMessagesWithAttachments(enriched, TIMEZONE);
+  const {
+    text: prompt,
+    images,
+    documents,
+  } = formatMessagesWithAttachments(enriched, TIMEZONE);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -188,7 +198,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
+    {
+      group: group.name,
+      messageCount: missedMessages.length,
+      imageCount: images.length,
+    },
     'Processing messages',
   );
 
@@ -210,39 +224,58 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const containerImages = images.length > 0
-    ? images.map((img) => ({ filename: img.filename, mediaType: img.mediaType }))
-    : undefined;
-  const containerDocs = documents.length > 0
-    ? documents.map((doc) => ({ filename: doc.filename, mediaType: doc.mediaType, originalName: doc.originalName }))
-    : undefined;
+  const containerImages =
+    images.length > 0
+      ? images.map((img) => ({
+          filename: img.filename,
+          mediaType: img.mediaType,
+        }))
+      : undefined;
+  const containerDocs =
+    documents.length > 0
+      ? documents.map((doc) => ({
+          filename: doc.filename,
+          mediaType: doc.mediaType,
+          originalName: doc.originalName,
+        }))
+      : undefined;
 
-  const output = await runAgent(group, prompt, chatJid, containerImages, containerDocs, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    containerImages,
+    containerDocs,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+  );
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
@@ -427,16 +460,39 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const enrichedMsgs = enrichMessagesWithAttachments(messagesToSend, group.folder);
-          const { text: formatted, images: pipeImages, documents: pipeDocs } = formatMessagesWithAttachments(enrichedMsgs, TIMEZONE);
-          const pipeContainerImages = pipeImages.length > 0
-            ? pipeImages.map((img) => ({ filename: img.filename, mediaType: img.mediaType }))
-            : undefined;
-          const pipeContainerDocs = pipeDocs.length > 0
-            ? pipeDocs.map((doc) => ({ filename: doc.filename, mediaType: doc.mediaType, originalName: doc.originalName }))
-            : undefined;
+          const enrichedMsgs = enrichMessagesWithAttachments(
+            messagesToSend,
+            group.folder,
+          );
+          const {
+            text: formatted,
+            images: pipeImages,
+            documents: pipeDocs,
+          } = formatMessagesWithAttachments(enrichedMsgs, TIMEZONE);
+          const pipeContainerImages =
+            pipeImages.length > 0
+              ? pipeImages.map((img) => ({
+                  filename: img.filename,
+                  mediaType: img.mediaType,
+                }))
+              : undefined;
+          const pipeContainerDocs =
+            pipeDocs.length > 0
+              ? pipeDocs.map((doc) => ({
+                  filename: doc.filename,
+                  mediaType: doc.mediaType,
+                  originalName: doc.originalName,
+                }))
+              : undefined;
 
-          if (queue.sendMessage(chatJid, formatted, pipeContainerImages, pipeContainerDocs)) {
+          if (
+            queue.sendMessage(
+              chatJid,
+              formatted,
+              pipeContainerImages,
+              pipeContainerDocs,
+            )
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
