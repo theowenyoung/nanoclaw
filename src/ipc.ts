@@ -33,7 +33,8 @@ function channelFromJid(jid: string): string {
   if (jid.startsWith('tg:')) return 'telegram';
   if (jid.startsWith('dc:')) return 'discord';
   if (jid.startsWith('sl:')) return 'slack';
-  if (jid.includes('@g.us') || jid.includes('@s.whatsapp.net')) return 'whatsapp';
+  if (jid.includes('@g.us') || jid.includes('@s.whatsapp.net'))
+    return 'whatsapp';
   return 'chat';
 }
 import { logger } from './logger.js';
