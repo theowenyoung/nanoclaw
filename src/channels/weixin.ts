@@ -295,9 +295,7 @@ async function downloadAndDecryptCdn(
   return decryptAesEcb(encrypted, key);
 }
 
-async function downloadPlainCdn(
-  encryptedQueryParam: string,
-): Promise<Buffer> {
+async function downloadPlainCdn(encryptedQueryParam: string): Promise<Buffer> {
   const url = buildCdnDownloadUrl(encryptedQueryParam);
   const res = await fetch(url);
   if (!res.ok) {
@@ -355,7 +353,10 @@ async function downloadAndStoreWeixinImage(
 
     return { filename, mediaType: 'image/jpeg' };
   } catch (err) {
-    logger.error({ err, groupFolder, msgId }, 'Failed to download WeChat image');
+    logger.error(
+      { err, groupFolder, msgId },
+      'Failed to download WeChat image',
+    );
     return null;
   }
 }
