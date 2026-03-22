@@ -1,12 +1,15 @@
-import crypto from 'crypto';
+import crypto, { createDecipheriv } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+import sharp from 'sharp';
+
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
-import { Channel, RegisteredGroup } from '../types.js';
+import { Channel, ImageAttachment, RegisteredGroup } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // WeChat API types
@@ -30,13 +33,26 @@ interface WeixinMessage {
   context_token?: string;
 }
 
+interface CDNMedia {
+  encrypt_query_param?: string;
+  aes_key?: string;
+  encrypt_type?: number;
+}
+
 interface MessageItem {
   type?: number; // 1=TEXT, 2=IMAGE, 3=VOICE, 4=FILE, 5=VIDEO
   text_item?: { text?: string };
-  image_item?: unknown;
-  voice_item?: { text?: string };
-  file_item?: { file_name?: string };
-  video_item?: unknown;
+  image_item?: {
+    media?: CDNMedia;
+    thumb_media?: CDNMedia;
+    /** Raw AES key as hex string */
+    aeskey?: string;
+    url?: string;
+    mid_size?: number;
+  };
+  voice_item?: { media?: CDNMedia; text?: string };
+  file_item?: { media?: CDNMedia; file_name?: string };
+  video_item?: { media?: CDNMedia };
   ref_msg?: { title?: string; message_item?: MessageItem };
 }
 
@@ -66,9 +82,12 @@ interface WeixinCredentials {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
+const CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
 const DEFAULT_API_TIMEOUT_MS = 15_000;
 const MAX_TEXT_LENGTH = 4000;
+const MAX_IMAGE_DIMENSION = 1024;
+const MAX_IMAGE_SIZE = 1 * 1024 * 1024; // 1MB
 
 function buildBaseInfo(): BaseInfo {
   return { channel_version: 'nanoclaw-weixin-1.0.0' };
@@ -231,6 +250,117 @@ async function weixinGetConfig(
 }
 
 // ---------------------------------------------------------------------------
+// CDN media download & decrypt
+// ---------------------------------------------------------------------------
+
+function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
+  const decipher = createDecipheriv('aes-128-ecb', key, null);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+
+/**
+ * Parse aes_key from CDN media. Two formats seen:
+ * - base64(raw 16 bytes) — images
+ * - base64(hex string of 16 bytes) — file/voice/video
+ */
+function parseAesKey(aesKeyBase64: string): Buffer {
+  const decoded = Buffer.from(aesKeyBase64, 'base64');
+  if (decoded.length === 16) return decoded;
+  if (
+    decoded.length === 32 &&
+    /^[0-9a-fA-F]{32}$/.test(decoded.toString('ascii'))
+  ) {
+    return Buffer.from(decoded.toString('ascii'), 'hex');
+  }
+  throw new Error(
+    `aes_key must decode to 16 bytes or 32-char hex, got ${decoded.length}`,
+  );
+}
+
+function buildCdnDownloadUrl(encryptedQueryParam: string): string {
+  return `${CDN_BASE_URL}/download?encrypted_query_param=${encodeURIComponent(encryptedQueryParam)}`;
+}
+
+async function downloadAndDecryptCdn(
+  encryptedQueryParam: string,
+  aesKeyBase64: string,
+): Promise<Buffer> {
+  const key = parseAesKey(aesKeyBase64);
+  const url = buildCdnDownloadUrl(encryptedQueryParam);
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`CDN download failed: ${res.status} ${res.statusText}`);
+  }
+  const encrypted = Buffer.from(await res.arrayBuffer());
+  return decryptAesEcb(encrypted, key);
+}
+
+async function downloadPlainCdn(
+  encryptedQueryParam: string,
+): Promise<Buffer> {
+  const url = buildCdnDownloadUrl(encryptedQueryParam);
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`CDN download failed: ${res.status} ${res.statusText}`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Download a WeChat image from CDN, decrypt, resize, and store in the group's images dir.
+ */
+async function downloadAndStoreWeixinImage(
+  item: MessageItem,
+  groupFolder: string,
+  msgId: string,
+): Promise<ImageAttachment | null> {
+  const img = item.image_item;
+  if (!img?.media?.encrypt_query_param) return null;
+
+  try {
+    // Resolve AES key: prefer image_item.aeskey (hex), fallback to media.aes_key (base64)
+    const aesKeyBase64 = img.aeskey
+      ? Buffer.from(img.aeskey, 'hex').toString('base64')
+      : img.media.aes_key;
+
+    const raw = aesKeyBase64
+      ? await downloadAndDecryptCdn(img.media.encrypt_query_param, aesKeyBase64)
+      : await downloadPlainCdn(img.media.encrypt_query_param);
+
+    // Resize with sharp
+    let resized = await sharp(raw)
+      .resize(MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION, {
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    if (resized.length > MAX_IMAGE_SIZE) {
+      resized = await sharp(resized).jpeg({ quality: 50 }).toBuffer();
+    }
+
+    // Save to group images dir
+    const groupDir = resolveGroupFolderPath(groupFolder);
+    const imagesDir = path.join(groupDir, 'images');
+    fs.mkdirSync(imagesDir, { recursive: true });
+
+    const filename = `${msgId}.jpg`;
+    fs.writeFileSync(path.join(imagesDir, filename), resized);
+
+    logger.info(
+      { groupFolder, filename, size: resized.length },
+      'WeChat image saved',
+    );
+
+    return { filename, mediaType: 'image/jpeg' };
+  } catch (err) {
+    logger.error({ err, groupFolder, msgId }, 'Failed to download WeChat image');
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // QR Code Login
 // ---------------------------------------------------------------------------
 
@@ -270,9 +400,7 @@ async function pollQRStatus(
     });
     clearTimeout(timer);
     if (!res.ok) {
-      throw new Error(
-        `QR status poll failed: ${res.status} ${res.statusText}`,
-      );
+      throw new Error(`QR status poll failed: ${res.status} ${res.statusText}`);
     }
     return (await res.json()) as {
       status: 'wait' | 'scaned' | 'confirmed' | 'expired';
@@ -465,11 +593,7 @@ export class WeixinChannel implements Channel {
   // Typing tickets per user
   private typingTickets = new Map<string, string>();
 
-  constructor(
-    token: string,
-    baseUrl: string,
-    opts: ChannelOpts,
-  ) {
+  constructor(token: string, baseUrl: string, opts: ChannelOpts) {
     this.token = token;
     this.baseUrl = baseUrl;
     this.opts = opts;
@@ -562,7 +686,10 @@ export class WeixinChannel implements Channel {
         if (this.abortController?.signal.aborted) return;
 
         consecutiveFailures++;
-        logger.error({ err, failures: consecutiveFailures }, 'WeChat poll error');
+        logger.error(
+          { err, failures: consecutiveFailures },
+          'WeChat poll error',
+        );
 
         if (consecutiveFailures >= 3) {
           consecutiveFailures = 0;
@@ -628,6 +755,24 @@ export class WeixinChannel implements Channel {
       return;
     }
 
+    // Download image if present
+    let images: ImageAttachment[] | undefined;
+    const imageItem = msg.item_list?.find(
+      (i) =>
+        i.type === MessageItemType.IMAGE &&
+        i.image_item?.media?.encrypt_query_param,
+    );
+    if (imageItem && group) {
+      const stored = await downloadAndStoreWeixinImage(
+        imageItem,
+        group.folder,
+        msgId,
+      );
+      if (stored) {
+        images = [stored];
+      }
+    }
+
     // Deliver message
     this.opts.onMessage(chatJid, {
       id: msgId,
@@ -637,10 +782,11 @@ export class WeixinChannel implements Channel {
       content,
       timestamp,
       is_from_me: false,
+      images,
     });
 
     logger.info(
-      { chatJid, contentLen: content.length },
+      { chatJid, contentLen: content.length, hasImage: !!images },
       'WeChat message stored',
     );
   }
@@ -724,7 +870,8 @@ export class WeixinChannel implements Channel {
           lines.push(
             `Agent: ${status.active ? (status.idleWaiting ? 'idle' : 'running') : 'stopped'}`,
           );
-          if (status.containerName) lines.push(`Container: ${status.containerName}`);
+          if (status.containerName)
+            lines.push(`Container: ${status.containerName}`);
           if (status.pendingTaskCount > 0)
             lines.push(`Queued tasks: ${status.pendingTaskCount}`);
         } else {
@@ -896,17 +1043,18 @@ export class WeixinChannel implements Channel {
 registerChannel('weixin', (opts: ChannelOpts) => {
   const envVars = readEnvFile(['WEIXIN_BOT_TOKEN', 'WEIXIN_BASE_URL']);
   const token = process.env.WEIXIN_BOT_TOKEN || envVars.WEIXIN_BOT_TOKEN || '';
-  const baseUrl =
-    process.env.WEIXIN_BASE_URL ||
-    envVars.WEIXIN_BASE_URL ||
-    '';
+  const baseUrl = process.env.WEIXIN_BASE_URL || envVars.WEIXIN_BASE_URL || '';
 
   // Try stored credentials if no env token
   if (!token) {
     const stored = loadCredentials();
     if (stored?.token) {
       logger.info('WeChat: using stored credentials');
-      return new WeixinChannel(stored.token, stored.baseUrl || DEFAULT_BASE_URL, opts);
+      return new WeixinChannel(
+        stored.token,
+        stored.baseUrl || DEFAULT_BASE_URL,
+        opts,
+      );
     }
     logger.warn('WeChat: WEIXIN_BOT_TOKEN not set and no stored credentials');
     return null;
