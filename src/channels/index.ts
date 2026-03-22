@@ -10,4 +10,7 @@
 // telegram
 import './telegram.js';
 
+// weixin
+import './weixin.js';
+
 // whatsapp
