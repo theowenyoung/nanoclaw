@@ -328,6 +328,9 @@ function buildContainerArgs(
     if (isMain) {
       // Main containers start as root so the entrypoint can mount --bind
       // to shadow .env. Privileges are dropped via setpriv in entrypoint.sh.
+      // Docker's node:22-slim image defaults to USER node (uid 1000), so we
+      // must explicitly override to root for setpriv to work.
+      args.push('--user', '0:0');
       args.push('-e', `RUN_UID=${hostUid}`);
       args.push('-e', `RUN_GID=${hostGid}`);
     } else {
