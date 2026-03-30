@@ -2,6 +2,7 @@
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
 FROM node:22-slim
+LABEL cleanup.exclude="true"
 
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
