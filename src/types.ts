@@ -30,6 +30,10 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  // Environment variable names to inject from .env into the container.
+  // Values are read from .env at container startup, never stored in DB.
+  // Example: ["DENO_DEPLOY_TOKEN"] → reads DENO_DEPLOY_TOKEN from .env and passes it to container
+  envFromHost?: string[];
 }
 
 export interface RegisteredGroup {

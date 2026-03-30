@@ -18,6 +18,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -182,6 +183,8 @@ function buildVolumeMounts(
             // Enable Claude's memory feature (persists user preferences between sessions)
             // https://code.claude.com/docs/en/memory#manage-auto-memory
             CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+            // Use Claude Opus 4.6 model
+            CLAUDE_CODE_USE_CLAUDE_MODEL: 'claude-opus-4-6',
           },
         },
         null,
@@ -293,6 +296,7 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   isMain: boolean,
+  group: RegisteredGroup,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -339,6 +343,21 @@ function buildContainerArgs(
     args.push('-e', 'HOME=/home/node');
   }
 
+  // Inject per-group environment variables from .env (containerConfig.envFromHost)
+  if (group.containerConfig?.envFromHost?.length) {
+    const envValues = readEnvFile(group.containerConfig.envFromHost);
+    for (const key of group.containerConfig.envFromHost) {
+      if (envValues[key]) {
+        args.push('-e', `${key}=${envValues[key]}`);
+      } else {
+        logger.warn(
+          { group: group.name, key },
+          'envFromHost key not found in .env, skipping',
+        );
+      }
+    }
+  }
+
   for (const mount of mounts) {
     if (mount.readonly) {
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
@@ -366,7 +385,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName, input.isMain);
+  const containerArgs = buildContainerArgs(mounts, containerName, input.isMain, group);
 
   logger.debug(
     {
