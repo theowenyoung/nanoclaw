@@ -307,7 +307,9 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  group?: RegisteredGroup,
 ): Promise<string[]> {
+  const isMain = agentIdentifier === undefined;
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
@@ -352,7 +354,7 @@ async function buildContainerArgs(
   }
 
   // Inject per-group environment variables from .env (containerConfig.envFromHost)
-  if (group.containerConfig?.envFromHost?.length) {
+  if (group?.containerConfig?.envFromHost?.length) {
     const envValues = readEnvFile(group.containerConfig.envFromHost);
     for (const key of group.containerConfig.envFromHost) {
       if (envValues[key]) {
@@ -401,6 +403,7 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    group,
   );
 
   logger.debug(
