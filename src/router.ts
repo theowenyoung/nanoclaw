@@ -138,7 +138,14 @@ export function formatMessagesWithAttachments(
     const displayTime = formatLocalTime(m.timestamp, timezone);
     if (m.images) images.push(...m.images);
     if (m.documents) documents.push(...m.documents);
-    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}">${escapeXml(m.content)}</message>`;
+    const replyAttr = m.reply_to_message_id
+      ? ` reply_to="${escapeXml(m.reply_to_message_id)}"`
+      : '';
+    const replySnippet =
+      m.reply_to_message_content && m.reply_to_sender_name
+        ? `\n  <quoted_message from="${escapeXml(m.reply_to_sender_name)}">${escapeXml(m.reply_to_message_content)}</quoted_message>`
+        : '';
+    return `<message sender="${escapeXml(m.sender_name)}" time="${escapeXml(displayTime)}"${replyAttr}>${replySnippet}${escapeXml(m.content)}</message>`;
   });
 
   const header = `<context timezone="${escapeXml(timezone)}" />\n`;
