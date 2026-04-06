@@ -494,10 +494,6 @@ Use available_groups.json to find the JID for a group. The folder name is auto-g
     if (args.name) {
       data.name = args.name;
     }
-    if (args.requires_trigger !== undefined) {
-      data.requiresTrigger = args.requires_trigger;
-    }
-
     writeIpcFile(TASKS_DIR, data);
 
     return {
