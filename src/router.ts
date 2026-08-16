@@ -3,6 +3,10 @@ import path from 'path';
 
 import { resolveGroupFolderPath } from './group-folder.js';
 import {
+  DOCUMENT_EXTENSIONS,
+  resolveDocumentMediaType,
+} from './document-types.js';
+import {
   Channel,
   DocumentAttachment,
   ImageAttachment,
@@ -69,49 +73,19 @@ export function enrichMessagesWithAttachments(
 
     // Enrich documents
     if (!m.documents && m.content.includes('[Document:')) {
-      // Try common extensions
-      const extensions = [
-        '.pdf',
-        '.txt',
-        '.html',
-        '.json',
-        '.csv',
-        '.md',
-        '.xml',
-        '.yaml',
-        '.yml',
-        '.js',
-        '.css',
-      ];
-      for (const ext of extensions) {
+      for (const ext of DOCUMENT_EXTENSIONS) {
         const filename = `${m.id}${ext}`;
         const docPath = path.join(docsDir, filename);
-        if (fs.existsSync(docPath)) {
-          const mimeMap: Record<string, string> = {
-            '.pdf': 'application/pdf',
-            '.txt': 'text/plain',
-            '.html': 'text/html',
-            '.json': 'application/json',
-            '.csv': 'text/csv',
-            '.md': 'text/markdown',
-            '.xml': 'application/xml',
-            '.yaml': 'text/yaml',
-            '.yml': 'text/yaml',
-            '.js': 'text/javascript',
-            '.css': 'text/css',
-          };
-          enriched = {
-            ...enriched,
-            documents: [
-              {
-                filename,
-                mediaType: mimeMap[ext] || 'application/octet-stream',
-                originalName: filename,
-              },
-            ],
-          };
-          break;
-        }
+        if (!fs.existsSync(docPath)) continue;
+
+        const mediaType = resolveDocumentMediaType(filename);
+        if (!mediaType) continue;
+
+        enriched = {
+          ...enriched,
+          documents: [{ filename, mediaType, originalName: filename }],
+        };
+        break;
       }
     }
 

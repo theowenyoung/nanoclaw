@@ -70,8 +70,21 @@ interface SessionsIndex {
 
 type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string }; title?: string };
+  | {
+      type: 'image';
+      source: { type: 'base64'; media_type: string; data: string };
+    }
+  // base64 document sources are PDF-only; everything else must be a text source
+  | {
+      type: 'document';
+      source: { type: 'base64'; media_type: 'application/pdf'; data: string };
+      title?: string;
+    }
+  | {
+      type: 'document';
+      source: { type: 'text'; media_type: 'text/plain'; data: string };
+      title?: string;
+    };
 
 interface SDKUserMessage {
   type: 'user';
@@ -83,9 +96,111 @@ interface SDKUserMessage {
 const IMAGES_DIR = '/workspace/group/images';
 const DOCS_DIR = '/workspace/group/documents';
 
+/** Max characters of a text document to inline before falling back to the file path */
+const MAX_INLINE_TEXT_CHARS = 200_000;
+
+/** Non-`text/*` MIME types that still carry plain-text payloads */
+const TEXTUAL_APPLICATION_TYPES = new Set([
+  'application/json',
+  'application/xml',
+  'application/yaml',
+  'application/x-yaml',
+  'application/javascript',
+  'application/x-javascript',
+  'application/x-sh',
+  'application/x-ndjson',
+  'application/sql',
+  'application/toml',
+]);
+
+function isTextualMediaType(mediaType: string): boolean {
+  if (mediaType.startsWith('text/')) return true;
+  if (TEXTUAL_APPLICATION_TYPES.has(mediaType)) return true;
+  return (
+    mediaType.startsWith('application/') && /\+(json|xml|yaml)$/.test(mediaType)
+  );
+}
+
+function describeUnreadableDocument(doc: ContainerDocument): string {
+  return `[The user sent a file: ${doc.originalName} (${doc.mediaType}). It is saved at ${path.join(DOCS_DIR, doc.filename)} — read it from there if you need its contents.]`;
+}
+
+/**
+ * Turn a stored document into content blocks the Messages API accepts.
+ * A base64 document source is only valid for application/pdf; text formats
+ * (markdown, csv, json, source code, …) must be sent as a text source with
+ * media_type text/plain. Anything else is referenced by its path in the
+ * mounted group directory so the agent can open it with its file tools.
+ */
+function buildDocumentBlocks(
+  doc: ContainerDocument,
+  docPath: string,
+): ContentBlock[] {
+  if (doc.mediaType === 'application/pdf') {
+    const data = fs.readFileSync(docPath).toString('base64');
+    log(
+      `Loaded PDF document: ${doc.originalName} (${data.length} base64 chars)`,
+    );
+    return [
+      {
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data },
+        title: doc.originalName,
+      },
+    ];
+  }
+
+  if (!isTextualMediaType(doc.mediaType)) {
+    log(
+      `Unsupported document type ${doc.mediaType} for ${doc.originalName}, referencing path`,
+    );
+    return [{ type: 'text', text: describeUnreadableDocument(doc) }];
+  }
+
+  const text = fs.readFileSync(docPath, 'utf8');
+  // A NUL byte means the file is binary despite its extension/MIME type
+  if (text.includes('\u0000')) {
+    log(`Document ${doc.originalName} looks binary, referencing path`);
+    return [{ type: 'text', text: describeUnreadableDocument(doc) }];
+  }
+
+  if (text.length > MAX_INLINE_TEXT_CHARS) {
+    log(
+      `Document ${doc.originalName} too large to inline (${text.length} chars), truncating`,
+    );
+    return [
+      {
+        type: 'document',
+        source: {
+          type: 'text',
+          media_type: 'text/plain',
+          data: text.slice(0, MAX_INLINE_TEXT_CHARS),
+        },
+        title: doc.originalName,
+      },
+      {
+        type: 'text',
+        text: `[${doc.originalName} was truncated at ${MAX_INLINE_TEXT_CHARS} characters. The full file is at ${path.join(DOCS_DIR, doc.filename)}.]`,
+      },
+    ];
+  }
+
+  log(
+    `Loaded text document: ${doc.originalName} (${text.length} chars, ${doc.mediaType})`,
+  );
+  return [
+    {
+      type: 'document',
+      source: { type: 'text', media_type: 'text/plain', data: text },
+      title: doc.originalName,
+    },
+  ];
+}
+
 /**
  * Build multimodal content blocks from text, images, and documents.
- * Reads files from the mounted group directory and base64-encodes them.
+ * Reads files from the mounted group directory; images and PDFs are
+ * base64-encoded, text documents are inlined as text.
  */
 function buildMultimodalContent(
   text: string,
@@ -98,19 +213,16 @@ function buildMultimodalContent(
     for (const doc of documents) {
       const docPath = path.join(DOCS_DIR, doc.filename);
       try {
-        if (fs.existsSync(docPath)) {
-          const data = fs.readFileSync(docPath).toString('base64');
-          blocks.push({
-            type: 'document',
-            source: { type: 'base64', media_type: doc.mediaType, data },
-            title: doc.originalName,
-          });
-          log(`Loaded document: ${doc.originalName} (${data.length} base64 chars)`);
-        } else {
+        if (!fs.existsSync(docPath)) {
           log(`Document not found: ${docPath}`);
+          continue;
         }
+        blocks.push(...buildDocumentBlocks(doc, docPath));
       } catch (err) {
-        log(`Failed to read document ${doc.filename}: ${err instanceof Error ? err.message : String(err)}`);
+        log(
+          `Failed to read document ${doc.filename}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        blocks.push({ type: 'text', text: describeUnreadableDocument(doc) });
       }
     }
   }
@@ -130,7 +242,9 @@ function buildMultimodalContent(
           log(`Image not found: ${imgPath}`);
         }
       } catch (err) {
-        log(`Failed to read image ${img.filename}: ${err instanceof Error ? err.message : String(err)}`);
+        log(
+          `Failed to read image ${img.filename}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   }
@@ -140,8 +254,14 @@ function buildMultimodalContent(
 }
 
 /** Check if there are any attachments to process */
-function hasAttachments(images?: ContainerImage[], documents?: ContainerDocument[]): boolean {
-  return (images != null && images.length > 0) || (documents != null && documents.length > 0);
+function hasAttachments(
+  images?: ContainerImage[],
+  documents?: ContainerDocument[],
+): boolean {
+  return (
+    (images != null && images.length > 0) ||
+    (documents != null && documents.length > 0)
+  );
 }
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
@@ -157,7 +277,11 @@ class MessageStream {
   private waiting: (() => void) | null = null;
   private done = false;
 
-  push(text: string, images?: ContainerImage[], documents?: ContainerDocument[]): void {
+  push(
+    text: string,
+    images?: ContainerImage[],
+    documents?: ContainerDocument[],
+  ): void {
     let content: string | ContentBlock[];
     if (hasAttachments(images, documents)) {
       content = buildMultimodalContent(text, images, documents);
@@ -419,7 +543,11 @@ function drainIpcInput(): IpcMessage[] {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
         if (data.type === 'message' && data.text) {
-          messages.push({ text: data.text, images: data.images, documents: data.documents });
+          messages.push({
+            text: data.text,
+            images: data.images,
+            documents: data.documents,
+          });
         }
       } catch (err) {
         log(
@@ -511,7 +639,9 @@ async function runQuery(
     }
     const messages = drainIpcInput();
     for (const msg of messages) {
-      log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images, ${msg.documents?.length || 0} docs)`);
+      log(
+        `Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images, ${msg.documents?.length || 0} docs)`,
+      );
       stream.push(msg.text, msg.images, msg.documents);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -762,7 +892,7 @@ async function main(): Promise<void> {
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.map(m => m.text).join('\n');
+    prompt += '\n' + pending.map((m) => m.text).join('\n');
     // Collect any attachments from pending IPC messages
     for (const m of pending) {
       if (m.images) {
@@ -825,13 +955,16 @@ async function main(): Promise<void> {
           allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
           hooks: {
-            PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+            PreCompact: [
+              { hooks: [createPreCompactHook(containerInput.assistantName)] },
+            ],
           },
         },
       })) {
-        const msgType = message.type === 'system'
-          ? `system/${(message as { subtype?: string }).subtype}`
-          : message.type;
+        const msgType =
+          message.type === 'system'
+            ? `system/${(message as { subtype?: string }).subtype}`
+            : message.type;
         log(`[slash-cmd] type=${msgType}`);
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -840,14 +973,20 @@ async function main(): Promise<void> {
         }
 
         // Observe compact_boundary to confirm compaction completed
-        if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+        if (
+          message.type === 'system' &&
+          (message as { subtype?: string }).subtype === 'compact_boundary'
+        ) {
           compactBoundarySeen = true;
           log('Compact boundary observed — compaction completed');
         }
 
         if (message.type === 'result') {
           const resultSubtype = (message as { subtype?: string }).subtype;
-          const textResult = 'result' in message ? (message as { result?: string }).result : null;
+          const textResult =
+            'result' in message
+              ? (message as { result?: string }).result
+              : null;
 
           if (resultSubtype?.startsWith('error')) {
             hadError = true;
@@ -874,11 +1013,15 @@ async function main(): Promise<void> {
       writeOutput({ status: 'error', result: null, error: errorMsg });
     }
 
-    log(`Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`);
+    log(
+      `Slash command done. compactBoundarySeen=${compactBoundarySeen}, hadError=${hadError}`,
+    );
 
     // Warn if compact_boundary was never observed — compaction may not have occurred
     if (!hadError && !compactBoundarySeen) {
-      log('WARNING: compact_boundary was not observed. Compaction may not have completed.');
+      log(
+        'WARNING: compact_boundary was not observed. Compaction may not have completed.',
+      );
     }
 
     // Only emit final session marker if no result was emitted yet and no error occurred
@@ -892,7 +1035,11 @@ async function main(): Promise<void> {
       });
     } else if (!hadError) {
       // Emit session-only marker so host updates session tracking
-      writeOutput({ status: 'success', result: null, newSessionId: slashSessionId });
+      writeOutput({
+        status: 'success',
+        result: null,
+        newSessionId: slashSessionId,
+      });
     }
     return;
   }
@@ -906,7 +1053,16 @@ async function main(): Promise<void> {
         `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
       );
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt, initialImages, initialDocs);
+      const queryResult = await runQuery(
+        prompt,
+        sessionId,
+        mcpServerPath,
+        containerInput,
+        sdkEnv,
+        resumeAt,
+        initialImages,
+        initialDocs,
+      );
       initialImages = undefined; // Only pass attachments once
       initialDocs = undefined;
       if (queryResult.newSessionId) {
@@ -936,7 +1092,9 @@ async function main(): Promise<void> {
         break;
       }
 
-      log(`Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images, ${nextMessage.documents?.length || 0} docs), starting new query`);
+      log(
+        `Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images, ${nextMessage.documents?.length || 0} docs), starting new query`,
+      );
       prompt = nextMessage.text;
       initialImages = nextMessage.images;
       initialDocs = nextMessage.documents;

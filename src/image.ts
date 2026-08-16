@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
 
+import { resolveDocumentMediaType } from './document-types.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 
@@ -95,22 +96,6 @@ function saveImage(
   return { filename, mediaType: 'image/jpeg' };
 }
 
-/** MIME types that Claude supports as document content blocks */
-const SUPPORTED_DOC_TYPES = new Set([
-  'application/pdf',
-  'text/plain',
-  'text/html',
-  'text/css',
-  'text/javascript',
-  'application/json',
-  'application/xml',
-  'text/xml',
-  'text/csv',
-  'text/markdown',
-  'application/x-yaml',
-  'text/yaml',
-]);
-
 /**
  * Download a document from a URL and save to the group's documents directory.
  * Returns metadata for passing to the container agent, or null on failure.
@@ -142,10 +127,10 @@ export async function downloadAndStoreDocument(
     }
 
     // Determine MIME type
-    const mediaType = mimeType || guessMimeType(originalName);
-    if (!SUPPORTED_DOC_TYPES.has(mediaType)) {
+    const mediaType = resolveDocumentMediaType(originalName, mimeType);
+    if (!mediaType) {
       logger.debug(
-        { groupFolder, originalName, mediaType },
+        { groupFolder, originalName, mimeType },
         'Unsupported document type for Claude, skipping',
       );
       return null;
@@ -171,23 +156,4 @@ export async function downloadAndStoreDocument(
     logger.error({ err, groupFolder, messageId }, 'Failed to process document');
     return null;
   }
-}
-
-function guessMimeType(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  const map: Record<string, string> = {
-    '.pdf': 'application/pdf',
-    '.txt': 'text/plain',
-    '.html': 'text/html',
-    '.htm': 'text/html',
-    '.css': 'text/css',
-    '.js': 'text/javascript',
-    '.json': 'application/json',
-    '.xml': 'application/xml',
-    '.csv': 'text/csv',
-    '.md': 'text/markdown',
-    '.yaml': 'text/yaml',
-    '.yml': 'text/yaml',
-  };
-  return map[ext] || 'application/octet-stream';
 }
